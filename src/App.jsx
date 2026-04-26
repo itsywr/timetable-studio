@@ -126,49 +126,53 @@ export default function App() {
     return () => window.removeEventListener('mousedown', close);
   }, [exportMenu]);
 
-  // ---- Persistence ----
+  // ---- Persistence (localStorage) ----
+  // Two slots:
+  //   tt-state    — working/autosaved state (every edit)
+  //   tt-snapshot — explicit "Save" snapshot (user-confirmed default)
+  //   tt-savedAt  — timestamp of last explicit save
+  const STORAGE_STATE = 'tt-state';
+  const STORAGE_SNAPSHOT = 'tt-snapshot';
+  const STORAGE_SAVED_AT = 'tt-savedAt';
+
   const [loaded, setLoaded] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle'); // idle|saving|saved|error
+  const lastSavedJson = useRef('');
 
-  // initial load from server — apply server state OR seed (only after fetch completes)
+  // Initial load — synchronous from localStorage.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch('/api/state');
-        const j = await r.json();
-        if (cancelled) return;
-        applyState(j.state || buildDefaultState());
-        setSavedAt(j.savedAt || null);
-      } catch (e) {
-        console.warn('Could not reach server, using local seed.', e);
-        if (!cancelled) applyState(buildDefaultState());
-      } finally {
-        if (!cancelled) setLoaded(true);
-      }
-    })();
-    return () => { cancelled = true; };
+    try {
+      const raw = localStorage.getItem(STORAGE_STATE) || localStorage.getItem(STORAGE_SNAPSHOT);
+      const stored = raw ? JSON.parse(raw) : null;
+      applyState(stored || buildDefaultState());
+      const ts = localStorage.getItem(STORAGE_SAVED_AT);
+      setSavedAt(ts || null);
+      const snap = localStorage.getItem(STORAGE_SNAPSHOT);
+      if (snap) lastSavedJson.current = snap;
+    } catch (e) {
+      console.warn('Could not load from localStorage; using seed.', e);
+      applyState(buildDefaultState());
+    } finally {
+      setLoaded(true);
+    }
   }, []);
 
-  // autosave to server in-memory state on every change (debounced)
   const stateBundle = useMemo(() => ({
     schoolName, subtitle, classes, periods, teachers, subjects, grid, footerText, pdfStyle,
   }), [schoolName, subtitle, classes, periods, teachers, subjects, grid, footerText, pdfStyle]);
 
+  // Autosave working state to localStorage on every change (debounced).
   const autosaveTimer = useRef(null);
   useEffect(() => {
     if (!loaded) return;
-    setDirty(true);
+    const json = JSON.stringify(stateBundle);
+    setDirty(json !== lastSavedJson.current);
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
-      fetch('/api/state', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stateBundle),
-      }).catch(() => {});
-    }, 400);
+      try { localStorage.setItem(STORAGE_STATE, json); } catch {}
+    }, 250);
     return () => clearTimeout(autosaveTimer.current);
   }, [stateBundle, loaded]);
 
@@ -184,21 +188,20 @@ export default function App() {
     setConfirmSave(false);
     setSaveStatus('saving');
     try {
-      const r = await fetch('/api/state/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stateBundle),
-      });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || 'save failed');
-      setSavedAt(j.savedAt);
+      const json = JSON.stringify(stateBundle);
+      const ts = new Date().toISOString();
+      localStorage.setItem(STORAGE_SNAPSHOT, json);
+      localStorage.setItem(STORAGE_STATE, json);
+      localStorage.setItem(STORAGE_SAVED_AT, ts);
+      lastSavedJson.current = json;
+      setSavedAt(ts);
       setDirty(false);
       setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1800);
+      setTimeout(() => setSaveStatus('idle'), 1500);
     } catch (e) {
       console.error(e);
       setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 2200);
+      setTimeout(() => setSaveStatus('idle'), 2000);
     }
   };
 
